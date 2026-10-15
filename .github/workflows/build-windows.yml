@@ -26,12 +26,6 @@ jobs:
       CCACHE_MAXSIZE: 2G
       REPO_SLUG: ${{ github.repository }}
     steps:
-      - name: Ce dépôt (rebrand + icône)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: overlay
-          persist-credentials: false
-
       - name: NeuralNote à la version figée
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,8 +35,103 @@ jobs:
           submodules: true
           persist-credentials: false
 
+      - name: Installer Pillow (pour l'icône)
+        run: python -m pip install pillow
+
       - name: Rebrand
-        run: python overlay/rebrand/rebrand.py src
+        shell: python {0}
+        run: |
+          import os
+          from pathlib import Path
+
+          NAME = "NoteNugget"
+          SLUG = os.environ.get("REPO_SLUG", "OWNER/NoteNugget")
+          SRC = Path("src").resolve()
+
+
+          def edit(rel, pairs):
+              path = SRC / rel
+              text = path.read_text(encoding="utf-8")
+              for old, new in pairs:
+                  if old not in text:
+                      raise SystemExit(f"[rebrand] motif introuvable dans {rel}: {old!r}")
+                  text = text.replace(old, new)
+              path.write_text(text, encoding="utf-8")
+              print(f"[rebrand] {rel}: {len(pairs)} remplacement(s)")
+
+
+          edit("CMakeLists.txt", [
+              ("project(NeuralNotePlugin VERSION 2.1.0)", "project(NeuralNotePlugin VERSION 1.0.0)"),
+              ('COMPANY_NAME "Dr. Audio"', f'COMPANY_NAME "{NAME}"'),
+              ('BUNDLE_ID "com.draudio.neuralnote"', 'BUNDLE_ID "com.notenugget.plugin"'),
+              ("PLUGIN_MANUFACTURER_CODE DrAu", "PLUGIN_MANUFACTURER_CODE NNug"),
+              ("PLUGIN_CODE NRNT", "PLUGIN_CODE NgtP"),
+              ('PRODUCT_NAME "NeuralNote"', f'PRODUCT_NAME "{NAME}"'),
+          ])
+
+          edit("Lib/Utils/NNFileUtils.cpp", [('.getChildFile("NeuralNote")', f'.getChildFile("{NAME}")')])
+          edit("Lib/Utils/NnLogger.cpp", [('getChildFile("NeuralNote.log")', f'getChildFile("{NAME}.log")'),
+                                          ('"NeuralNote " + juce::String(ProjectInfo', f'"{NAME} " + juce::String(ProjectInfo')])
+
+          edit("NeuralNote/Source/Components/NeuralNoteMainView.cpp", [
+              ("mUpdateCheck->checkForUpdate(false);", "// verification auto des mises a jour desactivee (NoteNugget)"),
+          ])
+          for rel in ("NeuralNote/Source/Components/UpdateCheck.h", "NeuralNote/Source/Components/UpdateCheck.cpp"):
+              text = (SRC / rel).read_text(encoding="utf-8")
+              text = text.replace("DamRsn/NeuralNote", SLUG).replace("of NeuralNote", f"of {NAME}")
+              (SRC / rel).write_text(text, encoding="utf-8")
+          print("[rebrand] UpdateCheck ->", SLUG)
+
+          edit(".github/scripts/configure_and_build.py", [('"-DNEURALNOTE_ASIO=ON"', '"-DNEURALNOTE_ASIO=OFF"')])
+
+          iss = SRC / "Installers" / "Windows" / "neuralnote.iss"
+          lines = iss.read_text(encoding="utf-8").splitlines()
+          out = []
+          for line in lines:
+              if line.startswith("AppId="):
+                  line = "AppId={{7E2B5C91-4A3D-4F6E-9B1A-5D8C0F3E2A47}"
+              elif line.startswith("AppVersion="):
+                  line = "AppVersion=1.0.0"
+              elif line.startswith("AppPublisher="):
+                  line = f"AppPublisher={NAME}"
+              elif line.startswith(("AppPublisherURL=", "AppSupportURL=", "AppUpdatesURL=")):
+                  line = line.split("=")[0] + f"=https://github.com/{SLUG}"
+              elif line.startswith("AppCopyright="):
+                  line = "AppCopyright=Based on NeuralNote, Copyright (c) 2026 Damien Ronssin (Apache-2.0)"
+              elif "Assets\\Logo" not in line and "NeuralNote_artefacts" not in line:
+                  line = line.replace("NeuralNote", NAME).replace("'neuralnote'", f"'{NAME.lower()}'")
+              out.append(line)
+          text = "\n".join(out) + "\n"
+          assert f"{NAME}.vst3" in text and f"{NAME}.exe" in text, "iss: noms de sortie non remplaces"
+          iss.write_text(text, encoding="utf-8")
+          print("[rebrand] neuralnote.iss")
+
+          from PIL import Image, ImageDraw, ImageFilter
+          S = 4096
+          img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+          d = ImageDraw.Draw(img)
+          d.rounded_rectangle((0, 0, S - 1, S - 1), radius=S // 5, fill=(24, 22, 30, 255))
+          P = lambda pts: [(x * S / 100, y * S / 100) for x, y in pts]
+          facets = [
+              ([(18, 58), (30, 34), (46, 30), (40, 56)], (176, 124, 20)),
+              ([(46, 30), (66, 26), (74, 44), (40, 56)], (232, 176, 44)),
+              ([(66, 26), (84, 40), (82, 62), (74, 44)], (200, 142, 28)),
+              ([(40, 56), (74, 44), (82, 62), (62, 78)], (244, 196, 70)),
+              ([(18, 58), (40, 56), (62, 78), (34, 76)], (190, 132, 24)),
+              ([(30, 34), (46, 30), (40, 40)], (255, 226, 130)),
+          ]
+          for pts, col in facets:
+              d.polygon(P(pts), fill=col + (255,))
+              d.line(P(pts + [pts[0]]), fill=(120, 80, 10, 255), width=int(S * 0.006), joint="curve")
+          d.ellipse(P([(54, 60), (60, 66)]), fill=(255, 244, 200, 235))
+          d.rectangle(P([(58.6, 44), (60, 63)]), fill=(255, 244, 200, 235))
+          d.polygon(P([(59.6, 44), (68, 49), (68, 53), (59.6, 48)]), fill=(255, 244, 200, 235))
+          img = img.filter(ImageFilter.GaussianBlur(S * 0.0008))
+          big = img.resize((1024, 1024), Image.LANCZOS)
+          logo = SRC / "NeuralNote" / "Assets" / "Logo"
+          big.save(str(logo / "neuralnote-1024.png"))
+          big.save(str(logo / "NeuralNote.ico"), sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])
+          print("[rebrand] icones generees")
 
       - name: Restore Vulkan SDK
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
