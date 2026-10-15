@@ -1,0 +1,105 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: DamRsn/NeuralNote
+  UPSTREAM_SHA: e6512e384f9f87d5880e71b485f7f78454822ac8
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    env:
+      VULKAN_SDK_VERSION: 1.4.363.0
+      VULKAN_SDK_SHA256: 94A82D378F7A5E3E54C9DB7D2FB7016AF136E14AC0A18DBF0F2F67A36352D141
+      CCACHE_VERSION: 4.14.1
+      CCACHE_SHA256: 6219f3865ca59aec41ee4b678df171d5d35855ecb2b6dbbbd20690b3a68af7b4
+      CCACHE_DIR: ${{ github.workspace }}/src/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}/src
+      CCACHE_MAXSIZE: 2G
+      REPO_SLUG: ${{ github.repository }}
+    steps:
+      - name: Ce dépôt (rebrand + icône)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: overlay
+          persist-credentials: false
+
+      - name: NeuralNote à la version figée
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ env.UPSTREAM_SHA }}
+          path: src
+          submodules: true
+          persist-credentials: false
+
+      - name: Rebrand
+        run: python overlay/rebrand/rebrand.py src
+
+      - name: Restore Vulkan SDK
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}
+          key: vulkan-sdk-${{ env.VULKAN_SDK_VERSION }}
+
+      - name: Set up toolchain
+        working-directory: src
+        run: python .github/scripts/windows_tools.py
+
+      - name: Restore soundfont
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: src/NeuralNote/Assets/SoundFont
+          key: soundfont-${{ hashFiles('src/Tools/fetch_soundfont.py', 'src/Tools/make_soundfont.py') }}
+
+      - name: Restore ccache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: src/.ccache
+          key: ccache-notenugget-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ccache-notenugget-
+
+      - name: Build
+        working-directory: src
+        run: python .github/scripts/configure_and_build.py
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: src/.ccache
+          key: ccache-notenugget-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Package (installeur Inno Setup)
+        working-directory: src
+        run: python .github/scripts/package_windows.py
+
+      - name: Zip du VST3 seul
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item src/Installers/Windows/Output/NoteNugget_Installer_Windows_x64.exe dist/
+          Compress-Archive -Path "src/build/NeuralNote_artefacts/Release/VST3/NoteNugget.vst3" -DestinationPath dist/NoteNugget_VST3_Windows_x64.zip
+          Get-ChildItem dist
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: NoteNugget-Windows-x64
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publier la Release (sur tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release create "${{ github.ref_name }}" dist/* --repo "${{ github.repository }}" --title "NoteNugget ${{ github.ref_name }}" --generate-notes
